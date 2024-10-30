@@ -1,13 +1,9 @@
+from pyspark.shell import spark
 from pyspark.sql import SparkSession
 from pymongo import MongoClient
 import pymysql
+from pyspark.sql.functions import col, explode, struct
 
-# Create a SparkSession
-spark = SparkSession.builder \
-    .appName("MongoDB_to_Datalake_to_MySQL") \
-    .getOrCreate()
-
-# Extract data from MongoDB
 def extract_from_mongodb():
     client = MongoClient("mongodb://localhost:27017/")
     db = client["your_database_name"]
@@ -20,23 +16,24 @@ def extract_from_mongodb():
 
     return df
 
-# Transform data (optional)
 def transform_data(df):
-    # Add transformation logic here, e.g., filtering, cleaning, joining
-    # ...
+    # Flatten nested structures (adjust based on your specific schema)
+    df = df.withColumn("flattened_array", explode(df["nested_array_column"])) \
+           .select("*", col("flattened_array.*"))
+
+    # Drop duplicate rows
+    df = df.dropDuplicates()
+
+    # Handle missing values and data type conversions
+    df = df.fillna(value=-999, subset=["numerical_column"])
+    df = df.withColumn("string_column", df["string_column"].cast("string").replace("", "NA", regex=True))
+
     return df
 
-# Load data to data lake (e.g., HDFS, S3)
 def load_to_datalake(df):
-    # Write DataFrame to data lake in a suitable format (e.g., Parquet, CSV)
     df.write.format("parquet").save("path/to/datalake")
 
-# Load data from data lake to MySQL
-def load_to_mysql(df):
-    # Read DataFrame from data lake
-    df = spark.read.format("parquet").load("path/to/datalake")
-
-    # Create a MySQL connection
+def load_to_mysql(df, table_name):
     conn = pymysql.connect(
         host="your_mysql_host",
         user="your_mysql_user",
@@ -44,20 +41,38 @@ def load_to_mysql(df):
         database="your_mysql_database"
     )
 
+    cursor = conn.cursor()
+    cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+
+    table_exists = cursor.fetchone() is not None
+
+    if not table_exists:
+        # Create table schema based on DataFrame (adjust as needed)
+        create_table_sql = f"""
+            CREATE TABLE {table_name} (
+                column1 INT,
+                column2 VARCHAR(255),
+                -- ... other columns based on your DataFrame schema
+            )
+        """
+        cursor.execute(create_table_sql)
+
     # Write DataFrame to MySQL
     df.write \
         .format("jdbc") \
         .option("url", "jdbc:mysql://your_mysql_host:3306/your_mysql_database") \
         .option("driver", "com.mysql.cj.jdbc.Driver") \
-        .option("dbtable", "your_mysql_table") \
+        .option("dbtable", table_name) \
         .option("user", "your_mysql_user") \
         .option("password", "your_mysql_password") \
         .mode("append") \
         .save()
 
-# Main ETL pipeline
+    cursor.close()
+    conn.close()
+
 if __name__ == "__main__":
     df = extract_from_mongodb()
-    df = transform_data(df)  # Optional
+    df = transform_data(df)
     load_to_datalake(df)
-    load_to_mysql(df)
+    load_to_mysql(df, "your_mysql_table_name")
